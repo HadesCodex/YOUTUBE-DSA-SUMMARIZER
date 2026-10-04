@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+/* Dark mode is switched by a `dark` class on <html> (see theme.js), not only by the system setting,
+   so the toggle button can override the system preference. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  html {
+    color-scheme: light;
+    -webkit-text-size-adjust: 100%;
+  }
+  html.dark {
+    color-scheme: dark; /* native controls and scrollbars follow the theme */
+  }
+  body {
+    @apply bg-slate-50 text-slate-800 antialiased dark:bg-slate-950 dark:text-slate-200;
+  }
+  /* One visible keyboard focus ring for everything focusable. */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-indigo-600 dark:outline-indigo-400;
+  }
+  ::selection {
+    @apply bg-indigo-200 text-slate-900 dark:bg-indigo-500/40 dark:text-white;
+  }
+}
+
+/* Subtle entrance for new content. Only when the user has not asked for reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  .fade-in {
+    animation: fade-in 0.3s ease-out both;
+  }
+}
+
+/* Reduced motion: no animations, no smooth scrolling, instant transitions. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
