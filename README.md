@@ -1,156 +1,246 @@
-# DSA Lecture Summariser
+# 📘 DSA Lecture Summariser
 
-Paste the link to an English-captioned **data structures and algorithms lecture on YouTube** and get structured revision notes: the problem, the algorithm steps, pseudocode, time and space complexity, edge cases, and a 5-line revision summary. The notes can be downloaded as a PDF.
+Turn a long YouTube DSA lecture into clean, exam-ready revision notes: problem statement, algorithm steps, pseudocode, time and space complexity, edge cases and a 5-line recap. Export the notes as a PDF.
 
-Long lectures are too big to send to an LLM cheaply, so the backend **cuts the transcript into sections, scores them with simple explainable heuristics, and sends only the most useful ones** (no embeddings). In measured runs this cut input tokens by **17% to 74%**, depending on lecture length (see [Measured results](#measured-results)).
+Built with **React**, **Spring Boot** and the **Gemini API**.
 
-## How it works
+---
+
+## ✨ Features
+
+- Paste a YouTube link and get structured notes in seconds
+- Fetches English captions directly from YouTube (no third-party transcript library)
+- **Smart filtering:** long transcripts are chunked, scored and trimmed so only the most informative parts are sent to Gemini, in a **single API call**
+- Detects non-DSA videos and says so instead of inventing notes
+- **Paste-transcript fallback** for videos where caption fetching fails
+- Retry and model fallback when Gemini is overloaded
+- Light and dark mode, responsive layout (one column on phones, two on desktop)
+- **PDF export** of the generated notes
+
+---
+
+## 🧠 How it works
 
 ```
- Browser (React + Tailwind, http://localhost:5173)
-   |  POST /api/summarise   { url, transcript? }
-   v
- Spring Boot backend (http://localhost:8080)
-   |
-   SummariseController
-   |
-   SummariseService
-   |-- TranscriptService
-   |     |-- VideoIdExtractor                     link -> 11-character video id
-   |     |-- pasted transcript?  --yes--> use it
-   |     |-- else YoutubeTranscriptFetcher ---> YouTube InnerTube API
-   |     |        (player call -> caption track -> timedtext XML)   English tracks only
-   |     |        TranscriptParser                XML -> one clean string
-   |     |-- TranscriptChunker                    ~650-word chunks (captions have no punctuation)
-   |     |-- ChunkScorer                          keywords + steps + problem phrases - filler
-   |     '-- ChunkSelector                        best chunk of 4 sections, then best overall, <= 5200 words
-   |-- PromptBuilder + SummarySchema              instructions + JSON schema
-   |-- GeminiClient ----------------------------> Gemini Interactions API (JSON mode)
-   |        retry once on 503/timeout, then an optional fallback model
-   '-- SummaryParser                              validates the JSON; non-DSA text -> NOT_A_DSA_LECTURE
-   |
-   v
- { videoId, modelUsed, stats, usage (tokens), summary }
+YouTube link
+   │
+   ▼
+VideoIdExtractor ──► YoutubeTranscriptFetcher ──► TranscriptParser ──► clean transcript
+                      (InnerTube player call,        (XML -> text)
+                       then caption download)
+                                                          │
+                                                          ▼
+                     TranscriptChunker ──► ChunkScorer ──► ChunkSelector
+                     (~650-word chunks)    (keyword,        (best chunk per section +
+                                            step, problem    best of the rest, within
+                                            signals,         a word budget, in order)
+                                            filler penalty)
+                                                          │
+                                                          ▼
+                     PromptBuilder ──► GeminiClient ──► SummaryParser ──► JSON response
+                     (one call, JSON schema,   (retry on 503,         (validated)
+                      faithfulness rules)       model fallback)
+                                                          │
+                                                          ▼
+                                              React UI  ──►  PDF export (jsPDF)
 ```
 
-**The interface.** One page with light and dark mode (it follows your system setting, with a toggle), a link field with inline validation and a "Try an example" button, a switch between fetching captions and pasting a transcript, a skeleton loading state with a Cancel button, a results page with the video thumbnail, chips showing how much of the transcript was sent, one card per section, and **Download PDF** and **Summarise another** buttons. On a wide screen the results use a two-column layout (the problem, steps and edge cases beside the pseudocode, complexity and revision notes); on smaller screens everything stacks. It works down to phone width and respects the reduced-motion setting.
+### The filtering pipeline
 
-**The filtering step in one paragraph.** YouTube auto-captions have no punctuation, so the transcript is cut into chunks of about 650 words. Each chunk gets a score: DSA keywords (strong terms such as "time complexity" and "base case" count 3, common words such as "array" count 1), step-by-step words ("first", "then"), and problem-statement phrases ("your task", "given an"), minus a penalty for filler ("subscribe", "welcome back"). The first and last chunk are scored on their body, ignoring the first/last 150 words where plugs and sign-offs sit. Selection then keeps the best chunk of each of 4 position-based sections (so a long multi-topic lecture is not summarised from one topic only), fills the rest of a 5,200-word budget by score, and restores lecture order. All word lists and weights are in one file, `ScoringConfig.java`.
+YouTube auto-captions have **no punctuation**, so sentence splitting alone does not work. The pipeline is built around that:
 
-## Stack
+1. **Chunker.** Splits the transcript into chunks of about 650 words. It breaks at a sentence end only if one appears before 800 words, otherwise at 650. Words are never changed, only grouped.
+2. **Scorer.** Gives each chunk an explainable score, normalised per 100 words, so chunk size does not matter:
+   `score = keywords + steps + problem phrases - filler penalty`
+   - strong DSA terms ("time complexity", "base case", "brute force", ...) weigh most; weaker vocabulary ("array", "pointer", ...) weighs less
+   - step markers ("first", "then", "finally") and problem-statement phrases ("you are given", "constraints") add points
+   - filler ("subscribe", "welcome back", ...) subtracts points
+   - the first 150 words of the first chunk and the last 150 words of the last chunk are ignored when scoring, so sign-offs do not hide real teaching
+   - all lists and weights live in one class, `ScoringConfig`
+3. **Selector.** Splits the lecture into 4 position-based sections, guarantees the best positively-scored chunk of each section, then fills the rest of a 5,200-word budget by global score and restores lecture order. This stops the selection piling up on one topic. Short lectures that fit the budget are never filtered.
 
-| Part | Technology |
+Where text was skipped, the kept chunks are joined with `[...]` so the model knows the text jumps.
+
+---
+
+## 🛠️ Tech stack
+
+| Layer | Technology |
 |---|---|
-| Backend | Java 17, Spring Boot 3.3.5, Maven, Spring `RestClient` (no SDK, no database, no auth) |
-| LLM | Gemini Interactions API, JSON response schema, default model `gemini-3.8-flash` |
-| Transcripts | Direct YouTube InnerTube call (ANDROID client) with a paste-transcript fallback |
-| Frontend | React 19 (plain JavaScript), Vite 8, Tailwind CSS 4 (official Vite plugin), jsPDF |
-| Tests | JUnit 5 + Mockito + `MockRestServiceServer` (195 tests), Vitest (100 tests). **No test calls YouTube or Gemini.** |
+| Frontend | React 19, Vite, Tailwind CSS 4, plain JavaScript |
+| PDF export | jsPDF (loaded only when you click Download) |
+| Backend | Spring Boot 3.3.5, Java 17, Maven |
+| AI | Gemini API (Interactions API), called with Spring's `RestClient`, no SDK |
+| Tests | JUnit 5 and MockRestServiceServer (backend), Vitest (frontend) |
 
-## Run it
+---
 
-**Prerequisites:** JDK 17+, Maven 3.9+, Node 22+ and npm, and a Gemini API key from Google AI Studio.
+## 📊 Measured results
 
-**1. Give the backend your key** (never commit it):
+Input tokens sent to Gemini, filtered vs the whole transcript (same model, `gemini-3.5-flash-lite`, one run per video):
 
+| Lecture | Transcript | Tokens sent (filtered) | Tokens (whole transcript) | Saved |
+|---|---|---|---|---|
+| Binary Search (Striver) | 6,325 words | 6,147 | 7,435 | **17.3%** |
+| Dynamic Programming (freeCodeCamp) | 20,802 words | 6,594 | 25,509 | **74.2%** |
+| **Both together** | | 12,741 | 32,944 | **61.3%** |
+
+- The saving grows with lecture length: the word budget caps what is sent, so a 20k-word lecture costs about the same as a 6k-word one.
+- Output tokens are about the same either way, so the saving is all on the input side.
+- Only input reduction was measured, not summary quality. In testing, filtering sometimes dropped real content (see limitations).
+- Token counts come from the model's own usage metadata, logged on every call.
+
+---
+
+## 🚀 Running it locally
+
+### Prerequisites
+- Java 17+ and Maven
+- Node.js 20+ (the project was built with Node 22)
+- A free Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
+
+### 1. Add your API key (never commit it)
+
+Create `backend/config/application-local.properties`:
+
+```properties
+gemini.api.key=your-key-here
 ```
-cd backend/config
-copy application-local.properties.example application-local.properties      # Windows
-# cp application-local.properties.example application-local.properties      # macOS / Linux
-```
 
-Edit `application-local.properties` and replace `PUT_YOUR_KEY_HERE`. (Alternatively set the `GEMINI_API_KEY` environment variable and skip the file.)
+No quotes, no spaces around `=`. This file is git-ignored. Alternatively, set the `GEMINI_API_KEY` environment variable. A template is provided as `application-local.properties.example`.
 
-**2. Start the backend** (from the `backend` folder, with the `local` profile so it reads `config/application-local.properties`):
+### 2. Start the backend
 
-```
+```bash
 cd backend
-mvn spring-boot:run "-Dspring-boot.run.profiles=local"
+mvn spring-boot:run -Dspring-boot.run.profiles=local
 ```
 
-**3. Start the frontend** in a second terminal:
+On PowerShell, quote the argument: `mvn spring-boot:run "-Dspring-boot.run.profiles=local"`.
+The API runs on `http://localhost:8080`. The `local` profile is what loads your key.
 
-```
+### 3. Start the frontend
+
+```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-Open **http://localhost:5173**. (The frontend must use port 5173: the backend only allows requests from that origin.)
+Open `http://localhost:5173`. (The port is fixed because the backend's CORS allows only 5173.)
 
-**Run the tests:** `cd backend && mvn test`, and `cd frontend && npm test`.
+### Tests
 
-### Useful backend settings (`backend/src/main/resources/application.properties`)
+```bash
+cd backend && mvn test      # 195 tests, none calls the real API
+cd frontend && npm test     # 100 tests
+```
 
-| Property | Default | Meaning |
+### Useful properties
+
+| Property | Default | Purpose |
 |---|---|---|
-| `gemini.model` | `gemini-3.8-flash` | Main model. `gemini-3.5-flash-lite` is cheaper and faster. |
-| `gemini.fallback-enabled` | `true` | After a 503 or timeout and one retry, try the fallback model once. |
-| `gemini.fallback-model` | `gemini-3.5-flash-lite` | The fallback model. |
-| `gemini.retry-delay-millis` | `2000` | Pause before the single retry. |
-| `summariser.filter-enabled` | `true` | `false` sends the whole transcript (for comparing token use). |
+| `gemini.api.key` | from `GEMINI_API_KEY` | API key |
+| `gemini.model` | `gemini-3.8-flash` | main model |
+| `gemini.fallback-enabled` | `true` | switch to the fallback model after a failed retry |
+| `gemini.fallback-model` | `gemini-3.5-flash-lite` | fallback model |
+| `gemini.retry-delay-millis` | `2000` | wait before the single retry |
+| `summariser.filter-enabled` | `true` | set `false` to send the whole transcript (for comparisons) |
 
-Override on the command line, for example: `mvn spring-boot:run "-Dspring-boot.run.profiles=local" "-Dspring-boot.run.arguments=--gemini.model=gemini-3.5-flash-lite"`.
+---
 
-## API
+## 🔌 API
 
-`POST /api/summarise` with `{ "url": "https://www.youtube.com/watch?v=...", "transcript": "optional pasted text" }`.
+`POST /api/summarise`
 
-Success (200):
+```json
+{ "url": "https://www.youtube.com/watch?v=...", "transcript": "optional pasted text" }
+```
+
+If `transcript` is supplied, YouTube is not called, and the link is used only for the video ID.
+
+Response (abridged):
 
 ```json
 {
-  "videoId": "MHf6awe89xw", "wordCount": 6325, "source": "fetched", "modelUsed": "gemini-3.8-flash",
+  "videoId": "...",
+  "modelUsed": "gemini-3.8-flash",
+  "source": "fetched",
+  "wordCount": 6325,
   "stats": { "totalWords": 6325, "chunksCreated": 10, "chunksKept": 8, "wordsSent": 5025 },
   "usage": { "inputTokens": 6147, "outputTokens": 568, "thoughtTokens": 0, "totalTokens": 6715 },
   "summary": {
-    "topic": "...", "problemStatement": "...", "algorithmSteps": ["..."], "pseudocode": "...",
-    "timeComplexity": { "value": "O(log n)", "explanation": "..." },
+    "topic": "...",
+    "problemStatement": "...",
+    "algorithmSteps": ["..."],
+    "pseudocode": "...",
+    "timeComplexity":  { "value": "O(log n)", "explanation": "..." },
     "spaceComplexity": { "value": "...", "explanation": "..." },
-    "edgeCases": ["..."], "revisionSummary": ["...", "...", "...", "...", "..."]
+    "edgeCases": ["..."],
+    "revisionSummary": ["... exactly 5 lines ..."]
   }
 }
 ```
 
-Errors are always `{ "error": "<CODE>", "message": "..." }`. Transcript problems (HTTP 422): `NO_ENGLISH_CAPTIONS`, `NO_CAPTIONS`, `VIDEO_UNAVAILABLE`, `YOUTUBE_REFUSED`, `YOUTUBE_UNREACHABLE`, `TRANSCRIPT_UNAVAILABLE`. Input problems (400): `INVALID_URL`, `VALIDATION_ERROR`. Summary problems: `NOT_A_DSA_LECTURE` (422), `SUMMARY_BLOCKED` (422), `GEMINI_UNAVAILABLE` (502), `GEMINI_TIMEOUT` (504), `GEMINI_RATE_LIMITED` / `GEMINI_QUOTA_EXCEEDED` (429), `SUMMARY_TRUNCATED` and `INVALID_MODEL_RESPONSE` (502), and server setup errors `SUMMARISER_NOT_CONFIGURED` (503), `GEMINI_AUTH_FAILED`, `GEMINI_MODEL_NOT_FOUND`, `GEMINI_BAD_REQUEST` (502). The frontend branches on the code, never on the message text.
+Errors are always `{ "error": "CODE", "message": "..." }`:
 
-## Measured results
+| Group | Codes |
+|---|---|
+| Input | `INVALID_URL`, `VALIDATION_ERROR` |
+| Transcript (HTTP 422) | `NO_ENGLISH_CAPTIONS`, `NO_CAPTIONS`, `VIDEO_UNAVAILABLE`, `YOUTUBE_REFUSED`, `YOUTUBE_UNREACHABLE`, `TRANSCRIPT_UNAVAILABLE` |
+| Content | `NOT_A_DSA_LECTURE` (422), `SUMMARY_BLOCKED` (422) |
+| Gemini | `GEMINI_AUTH_FAILED`, `GEMINI_RATE_LIMITED`, `GEMINI_QUOTA_EXCEEDED`, `GEMINI_MODEL_NOT_FOUND`, `GEMINI_TIMEOUT`, `GEMINI_UNAVAILABLE`, `GEMINI_BAD_REQUEST`, `SUMMARY_TRUNCATED`, `INVALID_MODEL_RESPONSE` |
+| Setup | `SUMMARISER_NOT_CONFIGURED` |
 
-Input tokens sent to Gemini with filtering on versus off (`summariser.filter-enabled=false`), measured on **`gemini-3.5-flash-lite`** on 2026-10-04 with real calls. (`gemini-3.8-flash` was too overloaded at the time to complete the comparison.) The unfiltered baseline is a single run per video.
+---
 
-| Lecture | Transcript words | Input tokens, whole transcript | Filtered, 4,600-word budget | Saved | Filtered, final 5,200-word budget | Saved |
-|---|---|---|---|---|---|---|
-| Binary Search (Striver, BS-1) | 6,325 | 7,435 | 5,523 | 25.7% | 6,147 | 17.3% |
-| Dynamic programming course (freeCodeCamp / AlgoMonster) | 20,802 | 25,509 | 5,697 | 77.7% | 6,594 | 74.2% |
-| **Both** | 27,127 | 32,944 | 11,220 | **65.9%** | 12,741 | **61.3%** |
+## 🧩 Design decisions
 
-Notes: the budget was raised from 4,600 to 5,200 words after the Binary Search summary lost the overflow fix, which sat in the last chunk; that is why the final saving is smaller. The final-budget runs also use a slightly longer prompt than the baseline run, so the saving is understated by a little. Output tokens were about the same in every run (520 to 610). Only two lectures were measured, so treat the numbers as indicative, not as a benchmark.
+- **Direct YouTube call instead of a library.** The Java transcript libraries are unofficial and went stale after YouTube changed its web client (the web route now needs a proof-of-origin token). The backend calls the InnerTube `player` endpoint as the ANDROID client, picks a caption track (manual English, then auto English) and downloads the caption XML. The client version and user agent are constants at the top of the fetcher, the first thing to update if YouTube changes.
+- **Safe XML parsing.** The caption XML comes from the internet, so the parser disables DTDs to block XXE attacks.
+- **Gemini is isolated in one class** (`GeminiClient`), with a JSON response schema so no fragile parsing is needed, `store: false` so transcripts are not retained, and no sampling parameters (the newer models reject them).
+- **Retry, then fallback.** On a 503 or timeout, one retry on the main model, then one call to the fallback model. Auth, quota, rate-limit and blocked-content errors are never retried. The response and logs record `modelUsed` and the number of attempts.
+- **Prompt rules.** The model is told the transcript is auto-generated and may contain errors, to use only what the text states, to mark missing information as "Not covered in the provided portion of the lecture", and to flag non-DSA videos. The transcript is wrapped as data, so instructions inside it are not followed.
+- **Secrets stay out of the build.** The key file lives in `backend/config/`, outside `src/main/resources`, so it is never packaged into the jar. The key is only sent in a request header and is never logged.
+- **Frontend renders model text as plain text**, never as HTML.
 
-## Known limitations
+---
 
-- **English captions only.** Videos whose only captions are in another language are rejected (the scoring word lists are English); paste an English transcript instead.
-- **One schema per lecture.** The summary has a single problem, one algorithm and one complexity, so a lecture that teaches ten problems gets a generic template (a 10-problem dynamic-programming lecture produced "O(N)" and a generic list of steps).
-- **Keyword-based scoring.** It favours generic DSA vocabulary. A chunk that explains a problem in plain words ("the minimum distance between any two cows") can score low and be dropped. There is no ground truth for summary quality, so the results measure size reduction, not quality.
-- **Models can invent content.** Even with a rule that every field must be backed by the text, `gemini-3.5-flash-lite` still wrote a space complexity for a lecture that never discusses one. `gemini-3.8-flash` followed the rule but was often overloaded (HTTP 503).
-- **Filtering can remove a lecture's conclusion** (the model then reports it as "not covered in the provided portion"), and auto-captions contain recognition errors ("pivot" heard as "pyot").
-- **Undocumented YouTube API.** The InnerTube call can change without notice (the constants to update are at the top of `YoutubeTranscriptFetcher`).
-- **YouTube blocks many cloud-provider IPs.** It works from a home connection but may fail once deployed; the paste-transcript fallback covers this.
+## ⚠️ Known limitations
 
-## Project layout
+- **English captions only.** Videos without an English track return a clear error, and you can paste a transcript instead.
+- **One schema per lecture.** A lecture covering many problems (for example a 10-problem DP lecture) gets one generic template rather than a summary per problem.
+- **Keyword-based scoring.** It favours chunks that name concepts over chunks that build understanding, and it can drop real content. In testing, the selector once dropped the chunk explaining the integer-overflow fix in binary search.
+- **Models can invent content.** `gemini-3.5-flash-lite` sometimes writes a space complexity the lecture never states. `gemini-3.8-flash` follows the "only what the text says" rule more closely but is often overloaded, which is why the fallback exists. The UI shows which model produced each summary.
+- **Undocumented YouTube API.** It can change without notice, and YouTube blocks many cloud-provider IPs, so expect refusals if you deploy to a cloud host. The paste fallback covers this.
+- **Not verified:** other browsers than Chromium, real phones, screen readers, and Gemini failure modes other than 503 (those rest on unit tests).
+
+---
+
+## 📂 Project structure
 
 ```
-backend/    Spring Boot app (src/main/java/com/dsasummariser/...), config/ (git-ignored local key file + example), PROGRESS.md (detailed build log)
-frontend/   Vite + React app (src/App.jsx, api.js, errors.js, pdf.js, components/)
-CLAUDE.md   Project decisions and working rules (for Claude Code)
+.
+├── backend/
+│   ├── config/                     # local key file (git-ignored)
+│   └── src/main/java/.../
+│       ├── controller/             # REST endpoint
+│       ├── service/                # fetcher, parser, chunker, scorer, selector, Gemini client
+│       ├── model/                  # request/response records
+│       ├── exception/              # error codes and global handler
+│       └── config/                 # CORS
+└── frontend/
+    └── src/
+        ├── components/             # form, loading, error, summary views
+        ├── api.js                  # the single fetch call
+        ├── errors.js               # error-code to message table
+        └── pdf.js                  # PDF export and ASCII sanitiser
 ```
 
-`backend/PROGRESS.md` is a detailed log of every design decision, test and measurement.
+---
 
-## Before you push
+## 🔒 Before you push
 
-- [ ] **Do not copy `backend/config/application-local.properties`.** It holds your API key. Only the `.example` file should go to GitHub.
-- [ ] Do not copy `node_modules/`, `target/`, `dist/` or any `.env` file (the provided `.gitignore` files already exclude them).
-- [ ] After `git init` and `git add`, run `git status` and read every file listed **before the first commit**. Confirm `git check-ignore -v backend/config/application-local.properties` prints a matching ignore rule.
-- [ ] Search the whole folder for your key before pushing: use your editor's "Find in Files" (so the key does not end up in your shell history), also searching hidden files and files that `.gitignore` excludes. It should appear only in `backend/config/application-local.properties`.
-- [ ] If a key was ever committed or pushed, treat it as leaked: delete it in Google AI Studio and create a new one.
-- [ ] Decide whether to keep `CLAUDE.md` and `backend/PROGRESS.md` in the public repo (they contain no secrets, but they are working notes).
+- Do not commit `backend/config/application-local.properties`, `node_modules/` or `target/`.
+- Run `git status` before the first commit and search the project for your key (Gemini keys start with `AIza`).
+- If a key ever leaks, delete it in AI Studio and create a new one.
